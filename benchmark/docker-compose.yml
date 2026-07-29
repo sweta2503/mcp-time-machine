@@ -1,0 +1,97 @@
+# Branch 12-benchmark — two stacks, same image, different env:
+#
+#  OLD  (port 8001)  STRICT_SESSIONS=true, no Redis
+#       Sessions minted on one instance; round-robin sends next request to a
+#       different instance → session not found → RPC error.
+#       Expected error rate under load: ~67% (2 of 3 instances miss).
+#
+#  NEW  (port 8000)  STRICT_SESSIONS=false, Redis-backed
+#       Stateless — any instance handles any request.
+#       Expected error rate: 0%.
+#
+# Demo sequence:
+#   docker compose -f benchmark/docker-compose.yml up --build -d
+#   locust -f benchmark/locustfile.py          # open http://localhost:8089
+#   Spawn 100 users at 10/s — watch old error rate climb, new stays at 0.
+version: "3.9"
+
+services:
+
+  # ── Redis (shared by new-protocol servers only) ────────────────────────
+  redis:
+    image: redis:7-alpine
+
+  # ── OLD protocol: strict in-memory sessions, no Redis ─────────────────
+  old_1:
+    build: ../server
+    environment:
+      PORT: "8000"
+      INSTANCE: "old_1"
+      STRICT_SESSIONS: "true"
+
+  old_2:
+    build: ../server
+    environment:
+      PORT: "8000"
+      INSTANCE: "old_2"
+      STRICT_SESSIONS: "true"
+
+  old_3:
+    build: ../server
+    environment:
+      PORT: "8000"
+      INSTANCE: "old_3"
+      STRICT_SESSIONS: "true"
+
+  nginx_old:
+    image: nginx:alpine
+    ports:
+      - "8001:80"
+    volumes:
+      - ./nginx-legacy.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - old_1
+      - old_2
+      - old_3
+
+  # ── NEW protocol: stateless, Redis-backed ─────────────────────────────
+  new_1:
+    build: ../server
+    environment:
+      PORT: "8000"
+      INSTANCE: "new_1"
+      STRICT_SESSIONS: "false"
+      REDIS_URL: "redis://redis:6379"
+    depends_on:
+      - redis
+
+  new_2:
+    build: ../server
+    environment:
+      PORT: "8000"
+      INSTANCE: "new_2"
+      STRICT_SESSIONS: "false"
+      REDIS_URL: "redis://redis:6379"
+    depends_on:
+      - redis
+
+  new_3:
+    build: ../server
+    environment:
+      PORT: "8000"
+      INSTANCE: "new_3"
+      STRICT_SESSIONS: "false"
+      REDIS_URL: "redis://redis:6379"
+    depends_on:
+      - redis
+
+  nginx_new:
+    image: nginx:alpine
+    ports:
+      - "8000:80"
+    volumes:
+      - ./nginx-modern.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - new_1
+      - new_2
+      - new_3
