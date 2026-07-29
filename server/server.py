@@ -1,19 +1,23 @@
 """
 MCP Fraud Alert Investigator
-Branch: 06-workflow-handle  —  explicit handle pattern
+Branch: 07-tasks  —  deep_scan_account_history as a Task
 
-Changes from 05-stateless-scale:
-  • flag_account now returns an opaque workflow handle on first call
-  • Client echoes the handle back as workflowHandle in the follow-up call
-  • Server uses the handle to correlate the two-step operation —
-    NO session state required, handle carries all needed context
-  • Demonstrates spec guidance: "mint an explicit handle from a tool
-    and have the model pass it back as an argument"
+Changes from 06-workflow-handle:
+  • deep_scan_account_history returns {resultType:"task", taskId:"…"} immediately
+  • Background work runs in a asyncio.Task stored in TASKS dict
+  • New endpoint: tasks/get polls status; returns completed output when done
+  • Client can disconnect after kicking off the scan, then poll from any instance
+    (task state lives in-process per instance in this demo; in production you'd
+     use a lightweight shared store like Redis — but even in-process shows the
+     protocol pattern correctly)
+  • Extension namespace: io.modelcontextprotocol/tasks
 """
+import asyncio
 import base64
 import hashlib
 import json
 import sys
+import uuid
 from datetime import datetime, timezone
 
 import uvicorn
@@ -23,7 +27,11 @@ from fastapi.responses import JSONResponse
 sys.path.insert(0, ".")
 from data import ACCOUNT_HISTORY, FLAGGED_ACCOUNTS, TRANSACTIONS
 
-app = FastAPI(title="Fraud Alert Investigator — 06-workflow-handle (2026-07-28)")
+app = FastAPI(title="Fraud Alert Investigator — 07-tasks (2026-07-28)")
+
+# ── Task store (per-instance; shows the protocol pattern) ──────────────────
+# In production: replace with Redis or a lightweight shared DB.
+TASKS: dict[str, dict] = {}   # task_id → {status, output | None}
 
 TOOLS = [
     {
@@ -141,6 +149,14 @@ async def mcp(request: Request):
             "cacheScope": "session",
         }))
 
+    # ── tasks/get (io.modelcontextprotocol/tasks extension) ───────────────
+    if method == "tasks/get":
+        task_id = params.get("taskId", "")
+        task    = TASKS.get(task_id)
+        if not task:
+            return JSONResponse(content=rpc_err(req_id, -32602, f"Task not found: {task_id}"))
+        return JSONResponse(content=ok(req_id, task))
+
     # ── tools/call ─────────────────────────────────────────────────────────
     if method == "tools/call":
         name = params.get("name")
@@ -221,20 +237,39 @@ async def dispatch_tool(req_id, name: str, args: dict):
         return ok(req_id, text_result(f"Account {aid} flagged. Reason: {reason}\nHandle confirmed: {handle[:16]}…"))
 
     if name == "deep_scan_account_history":
-        aid = args.get("account_id", "")
-        print(f"  ⏳ Scanning {aid} (blocking) …")
-        await asyncio.sleep(3)
-        history = ACCOUNT_HISTORY.get(aid, [])
-        total = sum(t["amount"] for t in history)
-        text = (
-            f"Deep scan complete — {aid}\n"
-            f"  Transactions: {len(history)}\n"
-            f"  Total volume: ${total:,.2f}\n"
-            f"  Verdict: {'HIGH RISK — escalate' if total > 10_000 else 'Low risk'}"
-        )
-        return ok(req_id, text_result(text))
+        aid     = args.get("account_id", "")
+        task_id = f"task_{uuid.uuid4().hex[:12]}"
+
+        # Register task as pending and kick off background work
+        TASKS[task_id] = {"status": "running", "output": None}
+        asyncio.get_event_loop().create_task(_run_deep_scan(task_id, aid))
+
+        print(f"  ✓ Task started: {task_id}  (client can poll tasks/get)")
+        return ok(req_id, {
+            "resultType": "task",
+            "taskId": task_id,
+            "content": [{"type": "text", "text": f"Scan started. Poll tasks/get with taskId={task_id}"}],
+        })
 
     return rpc_err(req_id, -32601, f"Unknown tool: {name}")
+
+
+async def _run_deep_scan(task_id: str, account_id: str):
+    """Background coroutine — simulates expensive scan work."""
+    await asyncio.sleep(4)   # visible pause for the demo
+    history = ACCOUNT_HISTORY.get(account_id, [])
+    total   = sum(t["amount"] for t in history)
+    text = (
+        f"Deep scan complete — {account_id}\n"
+        f"  Transactions: {len(history)}\n"
+        f"  Total volume: ${total:,.2f}\n"
+        f"  Verdict: {'HIGH RISK — escalate immediately' if total > 10_000 else 'Low risk'}"
+    )
+    TASKS[task_id] = {
+        "status": "completed",
+        "output": text_result(text),
+    }
+    print(f"\n  ✓ Task {task_id} completed")
 
 
 if __name__ == "__main__":
