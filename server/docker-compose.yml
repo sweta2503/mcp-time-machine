@@ -24,7 +24,7 @@ services:
     ports:
       - "8000:80"
     volumes:
-      - ../infra/nginx-roundrobin.conf:/etc/nginx/conf.d/default.conf
+      - ../infra/nginx-2instance.conf:/etc/nginx/conf.d/default.conf
     depends_on:
       - server_1
       - server_2

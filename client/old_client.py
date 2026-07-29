@@ -32,7 +32,8 @@ def post(url: str, body: dict, headers: dict | None = None) -> tuple[dict, dict]
     )
     try:
         with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read()), dict(resp.headers)
+            raw = resp.read()
+            return (json.loads(raw) if raw.strip() else {}), dict(resp.headers)
     except urllib.request.HTTPError as e:
         body = json.loads(e.read())
         return body, {}
