@@ -1,8 +1,12 @@
 """
 MCP Fraud Alert Investigator
-Branch: 08-mrtr  —  Multi Round-Trip Requests for flag_account
+Branch: 09-headers  —  Mcp-Method / Mcp-Name header routing + toy auth
 
-Changes from 07-tasks:
+Changes from 08-mrtr:
+  • nginx.conf now routes on Mcp-Method/Mcp-Name WITHOUT parsing JSON body
+  • deep_scan → heavy_servers upstream; everything else → fraud_servers
+  • flag_account requires X-Analyst-Token header (nginx rejects without it)
+  • Server logs which headers it sees to make routing visible on camera
   • flag_account on first call (no inputResponses) returns:
         {resultType: "input_required",
          inputRequests: [{id, prompt}],
@@ -29,7 +33,7 @@ from fastapi.responses import JSONResponse
 sys.path.insert(0, ".")
 from data import ACCOUNT_HISTORY, FLAGGED_ACCOUNTS, TRANSACTIONS
 
-app = FastAPI(title="Fraud Alert Investigator — 08-mrtr (2026-07-28)")
+app = FastAPI(title="Fraud Alert Investigator — 09-headers (2026-07-28)")
 
 # ── Task store (per-instance; shows the protocol pattern) ──────────────────
 # In production: replace with Redis or a lightweight shared DB.
