@@ -41,8 +41,14 @@ def post(url: str, body: dict, extra_headers: dict | None = None) -> dict:
 
 
 def _meta() -> dict:
-    """Every request carries _meta instead of a session id."""
-    return {"io.modelcontextprotocol/clientInfo": CLIENT_INFO}
+    """Every request carries _meta: identity, protocol version, and capabilities."""
+    return {
+        "io.modelcontextprotocol/clientInfo": CLIENT_INFO,
+        "io.modelcontextprotocol/protocolVersion": PROTOCOL,
+        "io.modelcontextprotocol/capabilities": {
+            "io.modelcontextprotocol/tasks": {},
+        },
+    }
 
 
 def banner(title: str):
@@ -65,9 +71,13 @@ def main():
         "jsonrpc": "2.0", "id": 1, "method": "server/discover",
         "params": {"_meta": _meta()},
     })
-    info = resp.get("result", {}).get("serverInfo", {})
-    caps = resp.get("result", {}).get("capabilities", {})
+    disc   = resp.get("result", {})
+    info   = disc.get("_meta", {}).get("serverInfo", {}) or disc.get("serverInfo", {})
+    caps   = disc.get("capabilities", {})
+    vers   = disc.get("supportedVersions", [])
     print(f"  ✓ Server: {info.get('name')} {info.get('version')}")
+    if vers:
+        print(f"  ✓ Supported versions: {vers}")
     print(f"  ✓ Capabilities: {list(caps.keys())}")
 
     # ── tools/list  (with caching metadata) ───────────────────────────────
