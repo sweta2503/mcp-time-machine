@@ -1,12 +1,14 @@
 """
 MCP Fraud Alert Investigator
-Branch: 09-headers  —  Mcp-Method / Mcp-Name header routing + toy auth
+Branch: 10-finale  —  old_client + new_client, same server, side by side
 
-Changes from 08-mrtr:
-  • nginx.conf now routes on Mcp-Method/Mcp-Name WITHOUT parsing JSON body
-  • deep_scan → heavy_servers upstream; everything else → fraud_servers
-  • flag_account requires X-Analyst-Token header (nginx rejects without it)
-  • Server logs which headers it sees to make routing visible on camera
+Changes from 09-headers:
+  • Server now accepts BOTH 2025-11-25 (initialize) AND 2026-07-28 (server/discover)
+  • initialize still works: mints a session id, echoes old protocol version
+  • server/discover works: stateless, _meta-based identity
+  • All 4 tools work identically for both clients
+  • Run old_client.py + new_client.py in split terminal panes simultaneously
+  • Demonstrates: the deprecation window in action — zero forced cutover
   • flag_account on first call (no inputResponses) returns:
         {resultType: "input_required",
          inputRequests: [{id, prompt}],
@@ -33,7 +35,7 @@ from fastapi.responses import JSONResponse
 sys.path.insert(0, ".")
 from data import ACCOUNT_HISTORY, FLAGGED_ACCOUNTS, TRANSACTIONS
 
-app = FastAPI(title="Fraud Alert Investigator — 09-headers (2026-07-28)")
+app = FastAPI(title="Fraud Alert Investigator — 10-finale (dual protocol)")
 
 # ── Task store (per-instance; shows the protocol pattern) ──────────────────
 # In production: replace with Redis or a lightweight shared DB.
