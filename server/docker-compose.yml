@@ -1,11 +1,13 @@
-# Branch: 02-break-it
-# Two server instances + nginx round-robin (NO sticky sessions).
-# Session store is per-instance in memory.
-# Mid-session requests that land on the wrong instance get:
-#   {"error":{"code":-32600,"message":"Session not found: <id>"}}
+# Branch: 05-stateless-scale
+# Three server instances + nginx round-robin.
+# No session store → every instance can handle every request.
+# Kill any instance mid-demo: remaining calls still succeed.
 #
-# Run:  docker-compose up --build --scale server=2   (or just up — replicas set below)
-# Then: python ../client/old_client.py
+# Demo sequence:
+#   1. docker-compose up --build
+#   2. python ../client/new_client.py
+#   3. docker-compose stop server_2   (mid-demo)
+#   4. client continues uninterrupted
 version: "3.9"
 
 services:
@@ -13,11 +15,19 @@ services:
     build: .
     environment:
       PORT: "8000"
+      INSTANCE: "server_1"
 
   server_2:
     build: .
     environment:
       PORT: "8000"
+      INSTANCE: "server_2"
+
+  server_3:
+    build: .
+    environment:
+      PORT: "8000"
+      INSTANCE: "server_3"
 
   nginx:
     image: nginx:alpine
@@ -28,3 +38,4 @@ services:
     depends_on:
       - server_1
       - server_2
+      - server_3

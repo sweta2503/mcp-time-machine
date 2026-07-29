@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 sys.path.insert(0, ".")
 from data import ACCOUNT_HISTORY, FLAGGED_ACCOUNTS, TRANSACTIONS
 
-app = FastAPI(title="Fraud Alert Investigator — 04-discover (2026-07-28)")
+app = FastAPI(title="Fraud Alert Investigator — 05-stateless-scale (2026-07-28)")
 
 TOOLS = [
     {
@@ -213,6 +213,8 @@ async def dispatch_tool(req_id, name: str, args: dict):
 
 if __name__ == "__main__":
     import os
-    port = int(os.getenv("PORT", 8000))
-    print(f"Fraud Alert Investigator (04-discover) — port {port}")
+    port     = int(os.getenv("PORT", 8000))
+    instance = os.getenv("INSTANCE", "standalone")
+    print(f"Fraud Alert Investigator (05-stateless-scale) [{instance}] — port {port}")
+    print("No session store. Any instance handles any request.")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
