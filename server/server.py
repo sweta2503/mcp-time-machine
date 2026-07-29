@@ -97,7 +97,11 @@ def rpc_err(req_id, code, message):
 
 
 def text_result(text: str, is_error: bool = False):
-    return {"content": [{"type": "text", "text": text}], "isError": is_error}
+    return {
+        "resultType": "complete",
+        "content": [{"type": "text", "text": text}],
+        "isError": is_error,
+    }
 
 
 @app.post("/mcp")
@@ -128,7 +132,7 @@ async def mcp(request: Request):
             "resultType": "complete",
             "supportedVersions": ["2026-07-28", "2025-11-25"],
             "capabilities": CAPABILITIES,
-            "_meta": {"serverInfo": SERVER_INFO},
+            "_meta": {"io.modelcontextprotocol/serverInfo": SERVER_INFO},
         }))
 
     # ── initialize (old client compatibility — respond with deprecation notice) ──
@@ -164,7 +168,7 @@ async def mcp(request: Request):
         task    = TASKS.get(task_id)
         if not task:
             return JSONResponse(content=rpc_err(req_id, -32602, f"Task not found: {task_id}"))
-        return JSONResponse(content=ok(req_id, task))
+        return JSONResponse(content=ok(req_id, {"resultType": "complete", **task}))
 
     # ── tools/call ─────────────────────────────────────────────────────────
     if method == "tools/call":
@@ -248,8 +252,8 @@ async def dispatch_tool(req_id, name: str, args: dict, params: dict = {}):
         except Exception:
             return rpc_err(req_id, -32602, "Invalid requestState")
 
-        approval_response = input_responses[0] if input_responses else {}
-        approved = str(approval_response.get("approved", "")).lower() in ("true", "yes", "y", "1")
+        approval_response = input_responses.get("fraud_approval", {}) if isinstance(input_responses, dict) else {}
+        approved = bool(approval_response.get("approved", False))
 
         if not approved:
             print(f"  ✗ Operator declined to flag {aid}")
@@ -267,26 +271,44 @@ async def dispatch_tool(req_id, name: str, args: dict, params: dict = {}):
         ))
 
     if name == "deep_scan_account_history":
-        client_caps = params.get("_meta", {}).get("io.modelcontextprotocol/capabilities", {})
-        supports_tasks = "io.modelcontextprotocol/tasks" in client_caps
+        client_caps   = params.get("_meta", {}).get("io.modelcontextprotocol/clientCapabilities", {})
+        extensions    = client_caps.get("extensions", {})
+        supports_tasks = "io.modelcontextprotocol/tasks" in extensions
         aid     = args.get("account_id", "")
         task_id = f"task_{uuid.uuid4().hex[:12]}"
 
-        # Register task as pending and kick off background work
+        if not supports_tasks:
+            print(f"  ⏳ Client lacks tasks extension — scanning synchronously …")
+            await asyncio.sleep(4)
+            history = ACCOUNT_HISTORY.get(aid, [])
+            total = sum(t["amount"] for t in history)
+            return ok(req_id, text_result(
+                f"Deep scan complete — {aid}\n"
+                f"  Transactions: {len(history)}\n"
+                f"  Total volume: ${total:,.2f}\n"
+                f"  Verdict: {'HIGH RISK — escalate immediately' if total > 10_000 else 'Low risk'}"
+            ))
+
         now = datetime.now(timezone.utc).isoformat()
         TASKS[task_id] = {
+            "taskId": task_id,
             "status": "working",
-            "startedAt": now,
+            "createdAt": now,
+            "lastUpdatedAt": now,
             "ttlMs": 300_000,
             "pollIntervalMs": 1_000,
         }
-        asyncio.get_event_loop().create_task(_run_deep_scan(task_id, aid))
+        asyncio.create_task(_run_deep_scan(task_id, aid))
 
         print(f"  ✓ Task started: {task_id}  (client can poll tasks/get)")
         return ok(req_id, {
             "resultType": "task",
             "taskId": task_id,
-            "content": [{"type": "text", "text": f"Scan started. Poll tasks/get with taskId={task_id}"}],
+            "status": "working",
+            "createdAt": now,
+            "lastUpdatedAt": now,
+            "ttlMs": 300_000,
+            "pollIntervalMs": 1_000,
         })
 
     return rpc_err(req_id, -32601, f"Unknown tool: {name}")
@@ -303,9 +325,12 @@ async def _run_deep_scan(task_id: str, account_id: str):
         f"  Total volume: ${total:,.2f}\n"
         f"  Verdict: {'HIGH RISK — escalate immediately' if total > 10_000 else 'Low risk'}"
     )
+    now2 = datetime.now(timezone.utc).isoformat()
     TASKS[task_id] = {
+        **TASKS.get(task_id, {}),
         "status": "completed",
-        "completedAt": datetime.now(timezone.utc).isoformat(),
+        "lastUpdatedAt": now2,
+        "completedAt": now2,
         "result": text_result(text),
     }
     print(f"\n  ✓ Task {task_id} completed")
