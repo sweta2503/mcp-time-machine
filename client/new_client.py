@@ -110,6 +110,7 @@ def main():
     account_to_flag = "ACC456"
     flag_reason     = "Velocity spike: 12 transactions in 4 minutes"
 
+    analyst_token = {"X-Analyst-Token": "demo-token"}
     resp = post(url, {
         "jsonrpc": "2.0", "id": 5, "method": "tools/call",
         "params": {
@@ -117,7 +118,7 @@ def main():
             "arguments": {"account_id": account_to_flag, "reason": flag_reason},
             "_meta": _meta(),
         },
-    })
+    }, extra_headers=analyst_token)
     result = resp.get("result", {})
 
     if result.get("resultType") == "input_required":
@@ -141,7 +142,7 @@ def main():
                 "inputResponses": [{"approved": approved}],
                 "requestState": request_state,
             },
-        })
+        }, extra_headers=analyst_token)
         result = resp.get("result", {})
 
     text = result.get("content", [{}])[0].get("text", "")

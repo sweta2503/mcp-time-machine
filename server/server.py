@@ -167,7 +167,7 @@ async def mcp(request: Request):
     if method == "tools/call":
         name = params.get("name")
         args = params.get("arguments", {})
-        result = await dispatch_tool(req_id, name, args)
+        result = await dispatch_tool(req_id, name, args, params)
         return JSONResponse(content=result)
 
     return JSONResponse(
@@ -176,7 +176,7 @@ async def mcp(request: Request):
     )
 
 
-async def dispatch_tool(req_id, name: str, args: dict):
+async def dispatch_tool(req_id, name: str, args: dict, params: dict = {}):
     import asyncio
 
     if name == "lookup_transaction":
