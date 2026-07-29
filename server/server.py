@@ -191,7 +191,7 @@ async def mcp(request: Request):
         task = await task_get(task_id)
         if not task:
             return JSONResponse(content=rpc_err(req_id, -32602, f"Task not found: {task_id}"))
-        if task.get("status") != "running":
+        if task.get("status") != "working":
             return JSONResponse(content=rpc_err(
                 req_id, -32602,
                 f"Cannot cancel task with status={task['status']!r}"
