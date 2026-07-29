@@ -194,13 +194,14 @@ async def dispatch_tool(req_id, name: str, args: dict):
         handle = args.get("workflowHandle")   # present on the second call
 
         if handle is None:
-            # First call: mint a handle encoding the operation, return it
-            payload  = json.dumps({"account_id": aid, "reason": reason, "ts": datetime.now(timezone.utc).isoformat()})
-            handle   = base64.urlsafe_b64encode(payload.encode()).decode()
-            checksum = hashlib.sha256(handle.encode()).hexdigest()[:8]
-            opaque_handle = f"wf_{checksum}_{handle[:20]}"   # truncated for display
-            print(f"  ↩  Issued workflow handle: {opaque_handle[:30]}…")
+            # First call: mint a self-contained handle that encodes all operation args
+            payload  = json.dumps({"account_id": aid, "reason": reason}).encode()
+            b64      = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+            checksum = hashlib.sha256(b64.encode()).hexdigest()[:8]
+            opaque_handle = f"wf_{checksum}_{b64}"
+            print(f"  ↩  Issued workflow handle: wf_{checksum}_…({len(b64)} chars)")
             return ok(req_id, {
+                "resultType": "complete",
                 "content": [{
                     "type": "text",
                     "text": (
@@ -212,7 +213,18 @@ async def dispatch_tool(req_id, name: str, args: dict):
                 "workflowHandle": opaque_handle,
             })
 
-        # Second call: handle present — decode and commit
+        # Second call: handle present — decode to recover original args (ignore args)
+        try:
+            parts = handle.split("_", 2)
+            if len(parts) != 3 or parts[0] != "wf":
+                raise ValueError("malformed handle")
+            pad = "=" * (-len(parts[2]) % 4)
+            recovered = json.loads(base64.urlsafe_b64decode(parts[2] + pad).decode())
+            aid    = recovered["account_id"]
+            reason = recovered["reason"]
+        except Exception as exc:
+            return rpc_err(req_id, -32602, f"Invalid workflowHandle: {exc}")
+
         approved = args.get("approved", False)
         if not approved:
             return ok(req_id, text_result(f"Flag operation cancelled by operator. Account {aid} unchanged."))
