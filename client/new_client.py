@@ -45,8 +45,10 @@ def _meta() -> dict:
     return {
         "io.modelcontextprotocol/clientInfo": CLIENT_INFO,
         "io.modelcontextprotocol/protocolVersion": PROTOCOL,
-        "io.modelcontextprotocol/capabilities": {
-            "io.modelcontextprotocol/tasks": {},
+        "io.modelcontextprotocol/clientCapabilities": {
+            "extensions": {
+                "io.modelcontextprotocol/tasks": {}
+            }
         },
     }
 
@@ -72,7 +74,7 @@ def main():
         "params": {"_meta": _meta()},
     })
     disc   = resp.get("result", {})
-    info   = disc.get("_meta", {}).get("serverInfo", {}) or disc.get("serverInfo", {})
+    info   = disc.get("_meta", {}).get("io.modelcontextprotocol/serverInfo", {}) or disc.get("_meta", {}).get("serverInfo", {}) or disc.get("serverInfo", {})
     caps   = disc.get("capabilities", {})
     vers   = disc.get("supportedVersions", [])
     print(f"  ✓ Server: {info.get('name')} {info.get('version')}")
@@ -134,8 +136,9 @@ def main():
     if result.get("resultType") == "input_required":
         # Server needs human confirmation before committing
         print(f"\n  ⚠  Server requires input before flagging {account_to_flag}:")
-        for req in result.get("inputRequests", []):
-            print(f"     {req['prompt']}")
+        for _key, req in result.get("inputRequests", {}).items():
+            msg = req.get("params", {}).get("message", "")
+            print(f"     {msg}")
 
         # Prompt the operator (you, on camera)
         answer = input("\n  Approve? [y/N] ").strip().lower()
@@ -149,7 +152,7 @@ def main():
                 "name": "flag_account",
                 "arguments": {"account_id": account_to_flag, "reason": flag_reason},
                 "_meta": _meta(),
-                "inputResponses": [{"approved": approved}],
+                "inputResponses": {"fraud_approval": {"approved": approved}},
                 "requestState": request_state,
             },
         }, extra_headers=analyst_token)
