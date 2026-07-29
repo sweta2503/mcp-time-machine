@@ -81,7 +81,11 @@ def rpc_err(req_id, code, message):
 
 
 def text_result(text: str, is_error: bool = False):
-    return {"content": [{"type": "text", "text": text}], "isError": is_error}
+    return {
+        "resultType": "complete",
+        "content": [{"type": "text", "text": text}],
+        "isError": is_error,
+    }
 
 
 @app.post("/mcp")
@@ -112,7 +116,7 @@ async def mcp(request: Request):
             "resultType": "complete",
             "supportedVersions": ["2026-07-28", "2025-11-25"],
             "capabilities": CAPABILITIES,
-            "_meta": {"serverInfo": SERVER_INFO},
+            "_meta": {"io.modelcontextprotocol/serverInfo": SERVER_INFO},
         }))
 
     # ── initialize (old client compatibility — respond with deprecation notice) ──
