@@ -36,7 +36,8 @@ def post(url: str, body: dict, extra_headers: dict | None = None) -> dict:
     data = json.dumps(body).encode()
     req  = urllib.request.Request(url, data=data, headers=headers, method="POST")
     with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read())
+        raw = resp.read()
+        return json.loads(raw) if raw.strip() else {}
 
 
 def _meta() -> dict:
