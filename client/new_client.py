@@ -45,8 +45,10 @@ def _meta() -> dict:
     return {
         "io.modelcontextprotocol/clientInfo": CLIENT_INFO,
         "io.modelcontextprotocol/protocolVersion": PROTOCOL,
-        "io.modelcontextprotocol/capabilities": {
-            "io.modelcontextprotocol/tasks": {},
+        "io.modelcontextprotocol/clientCapabilities": {
+            "extensions": {
+                "io.modelcontextprotocol/tasks": {}
+            }
         },
     }
 
@@ -72,7 +74,7 @@ def main():
         "params": {"_meta": _meta()},
     })
     disc   = resp.get("result", {})
-    info   = disc.get("_meta", {}).get("serverInfo", {}) or disc.get("serverInfo", {})
+    info   = disc.get("_meta", {}).get("io.modelcontextprotocol/serverInfo", {}) or disc.get("_meta", {}).get("serverInfo", {}) or disc.get("serverInfo", {})
     caps   = disc.get("capabilities", {})
     vers   = disc.get("supportedVersions", [])
     print(f"  ✓ Server: {info.get('name')} {info.get('version')}")
