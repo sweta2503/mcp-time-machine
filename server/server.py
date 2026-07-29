@@ -109,9 +109,10 @@ async def mcp(request: Request):
     if method == "server/discover":
         print("  → responding with serverInfo + capabilities")
         return JSONResponse(content=ok(req_id, {
-            "protocolVersion": "2026-07-28",
-            "serverInfo": SERVER_INFO,
+            "resultType": "complete",
+            "supportedVersions": ["2026-07-28", "2025-11-25"],
             "capabilities": CAPABILITIES,
+            "_meta": {"serverInfo": SERVER_INFO},
         }))
 
     # ── initialize (old client compatibility — respond with deprecation notice) ──
@@ -138,7 +139,7 @@ async def mcp(request: Request):
         return JSONResponse(content=ok(req_id, {
             "tools": TOOLS,
             "ttlMs": 300_000,       # new in 2026-07-28: client may cache for 5 min
-            "cacheScope": "session",
+            "cacheScope": "private",
         }))
 
     # ── tools/call ─────────────────────────────────────────────────────────
@@ -177,7 +178,7 @@ async def dispatch_tool(req_id, name: str, args: dict):
         if not FLAGGED_ACCOUNTS:
             return ok(req_id, text_result("No accounts currently flagged."))
         lines = [
-            f"  • {aid}: {info['holder']} — {info['flag_reason']}"
+            f"  • {aid}: {info.get('holder', 'Unknown')} — {info['flag_reason']}"
             for aid, info in FLAGGED_ACCOUNTS.items()
         ]
         return ok(req_id, text_result("Flagged accounts:\n" + "\n".join(lines)))
@@ -213,6 +214,7 @@ async def dispatch_tool(req_id, name: str, args: dict):
 
         FLAGGED_ACCOUNTS[aid] = {
             "account_id": aid,
+            "holder": "Unknown",
             "flag_reason": reason,
             "flagged_at": datetime.now(timezone.utc).isoformat(),
             "via_handle": handle[:16] + "…",
