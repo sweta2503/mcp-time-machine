@@ -225,16 +225,24 @@ async def dispatch_tool(req_id, name: str, args: dict, params: dict = {}):
             print(f"  ↩  MRTR: requesting operator approval (requestId={request_id})")
             return ok(req_id, {
                 "resultType": "input_required",
-                "inputRequests": [
-                    {
-                        "id": request_id,
-                        "prompt": (
-                            f"Flag account {aid}?\n"
-                            f"Reason: {reason}\n"
-                            f"This action is irreversible. Approve? [y/N]"
-                        ),
+                "inputRequests": {
+                    "fraud_approval": {
+                        "method": "elicitation/create",
+                        "params": {
+                            "mode": "form",
+                            "message": (
+                                f"Flag account {aid}?\n"
+                                f"Reason: {reason}\n"
+                                f"This action is irreversible."
+                            ),
+                            "requestedSchema": {
+                                "type": "object",
+                                "properties": {"approved": {"type": "boolean"}},
+                                "required": ["approved"],
+                            },
+                        },
                     }
-                ],
+                },
                 "requestState": state_payload,
                 "content": [{"type": "text", "text": "Awaiting operator approval before flagging account."}],
             })
