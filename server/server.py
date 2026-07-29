@@ -79,6 +79,7 @@ SERVER_INFO = {"name": "fraud-investigator", "version": "2.0.0"}
 CAPABILITIES = {
     "tools": {"listChanged": False},
     "resources": {},
+    "extensions": {"io.modelcontextprotocol/tasks": {}},
 }
 
 
@@ -151,8 +152,9 @@ async def mcp(request: Request):
     # ── tools/list ─────────────────────────────────────────────────────────
     if method == "tools/list":
         return JSONResponse(content=ok(req_id, {
+            "resultType": "complete",
             "tools": TOOLS,
-            "ttlMs": 300_000,       # new in 2026-07-28: client may cache for 5 min
+            "ttlMs": 300_000,
             "cacheScope": "private",
         }))
 
