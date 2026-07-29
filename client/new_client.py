@@ -160,6 +160,7 @@ def main():
     })
     result = resp.get("result", {})
 
+    task_id = None
     if result.get("resultType") == "task":
         task_id = result["taskId"]
         print(f"  ✓ Task started: {task_id}")
@@ -187,6 +188,53 @@ def main():
         text = result.get("content", [{}])[0].get("text", "")
         for line in text.splitlines():
             print(f"  {line}")
+
+    # ── Restart resilience demo (branch 11+: Redis-backed tasks) ──────────
+    if task_id:
+        import subprocess, shutil
+        if shutil.which("docker"):
+            print(f"\n[REDIS DEMO] Task {task_id} is stored in Redis.")
+            print("[REDIS DEMO] Restarting ALL server instances to prove durability …")
+            subprocess.run(
+                ["docker", "compose", "-f", "server/docker-compose.yml",
+                 "restart", "server_1", "server_2", "server_3"],
+                capture_output=True,
+            )
+            print("[REDIS DEMO] Waiting for servers to come back online …")
+            time.sleep(5)
+            poll = post(url, {
+                "jsonrpc": "2.0", "id": 99, "method": "tasks/get",
+                "params": {"taskId": task_id, "_meta": _meta()},
+            })
+            status_after = poll.get("result", {}).get("status", poll.get("error", {}).get("message", "?"))
+            print(f"[REDIS DEMO] ✓ Status after full restart: {status_after}")
+
+        # ── Cancel demo ───────────────────────────────────────────────────
+        print("\n[CANCEL DEMO] Starting a task and cancelling it immediately …")
+        resp2 = post(url, {
+            "jsonrpc": "2.0", "id": 100, "method": "tools/call",
+            "params": {
+                "name": "deep_scan_account_history",
+                "arguments": {"account_id": "ACC789"},
+                "_meta": _meta(),
+            },
+        })
+        cancel_id = resp2.get("result", {}).get("taskId")
+        if cancel_id:
+            print(f"  Task {cancel_id} started")
+            cancel_resp = post(url, {
+                "jsonrpc": "2.0", "id": 101, "method": "tasks/cancel",
+                "params": {"taskId": cancel_id, "_meta": _meta()},
+            })
+            cancelled = cancel_resp.get("result", {}).get("cancelled", False)
+            print(f"  ✓ tasks/cancel returned: cancelled={cancelled}")
+            time.sleep(2)
+            verify = post(url, {
+                "jsonrpc": "2.0", "id": 102, "method": "tasks/get",
+                "params": {"taskId": cancel_id, "_meta": _meta()},
+            })
+            final_status = verify.get("result", {}).get("status", "?")
+            print(f"  ✓ Final status in Redis: {final_status}")
 
     banner("Done ✓")
 

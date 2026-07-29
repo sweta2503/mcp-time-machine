@@ -1,33 +1,28 @@
 """
 MCP Fraud Alert Investigator
-Branch: 10-finale  —  old_client + new_client, same server, side by side
+Branch: 11-redis-tasks — Redis-backed task store
 
-Changes from 09-headers:
-  • Server now accepts BOTH 2025-11-25 (initialize) AND 2026-07-28 (server/discover)
-  • initialize still works: mints a session id, echoes old protocol version
-  • server/discover works: stateless, _meta-based identity
-  • All 4 tools work identically for both clients
-  • Run old_client.py + new_client.py in split terminal panes simultaneously
-  • Demonstrates: the deprecation window in action — zero forced cutover
-  • flag_account on first call (no inputResponses) returns:
-        {resultType: "input_required",
-         inputRequests: [{id, prompt}],
-         requestState: <opaque blob>}
-  • Client prompts the operator (you, on camera), then retries with:
-        {inputResponses: [{id, approved: true/false}],
-         requestState: <echoed blob>}
-  • requestState is a signed opaque token; no server-side session needed.
-    Server decodes it on the second call to recover the original arguments.
-  • Natural fit: no real bank auto-flags an account without human sign-off.
+Changes from 10-finale:
+  • TASKS in-memory dict replaced with Redis (key task:{id}, 1h TTL)
+  • Any instance can read or write any task — no per-instance state
+  • New MCP method: tasks/cancel
+    — sets status to "cancelled" in Redis
+    — background coroutine checks the flag before writing output
+  • Demonstrates task durability: restart all servers, task result survives
+  • STRICT_SESSIONS env var (false by default): when true, validates
+    Mcp-Session-Id against a per-instance in-memory store.
+    Used by the benchmark branch (12) to show old-protocol failures
+    under round-robin without changing any client code.
 """
 import asyncio
 import base64
-import hashlib
 import json
+import os
 import sys
 import uuid
 from datetime import datetime, timezone
 
+import redis.asyncio as aioredis
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -35,11 +30,37 @@ from fastapi.responses import JSONResponse
 sys.path.insert(0, ".")
 from data import ACCOUNT_HISTORY, FLAGGED_ACCOUNTS, TRANSACTIONS
 
-app = FastAPI(title="Fraud Alert Investigator — 10-finale (dual protocol)")
+app = FastAPI(title="Fraud Alert Investigator — 11-redis-tasks")
 
-# ── Task store (per-instance; shows the protocol pattern) ──────────────────
-# In production: replace with Redis or a lightweight shared DB.
-TASKS: dict[str, dict] = {}   # task_id → {status, output | None}
+# ── Redis ───────────────────────────────────────────────────────────────────
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+_redis: aioredis.Redis | None = None
+
+
+async def get_redis() -> aioredis.Redis:
+    global _redis
+    if _redis is None:
+        _redis = aioredis.from_url(REDIS_URL, decode_responses=True)
+    return _redis
+
+
+async def task_set(task_id: str, data: dict, ttl: int = 3600):
+    r = await get_redis()
+    await r.set(f"task:{task_id}", json.dumps(data), ex=ttl)
+
+
+async def task_get(task_id: str) -> dict | None:
+    r = await get_redis()
+    raw = await r.get(f"task:{task_id}")
+    return json.loads(raw) if raw else None
+
+
+# ── Strict-session mode (benchmark use) ────────────────────────────────────
+# When STRICT_SESSIONS=true the server validates Mcp-Session-Id against a
+# per-instance in-memory dict. Round-robin then breaks sessions exactly as
+# it did in branch 01, letting the benchmark show the failure rate live.
+STRICT_SESSIONS = os.environ.get("STRICT_SESSIONS", "false").lower() == "true"
+LOCAL_SESSIONS: dict[str, str] = {}   # session_id → ISO timestamp, per-instance
 
 TOOLS = [
     {
@@ -72,7 +93,7 @@ TOOLS = [
     },
     {
         "name": "deep_scan_account_history",
-        "description": "Deep-scan all transactions for an account. Long-running.",
+        "description": "Deep-scan all transactions for an account. Long-running — returns a task.",
         "inputSchema": {
             "type": "object",
             "properties": {"account_id": {"type": "string"}},
@@ -82,10 +103,7 @@ TOOLS = [
 ]
 
 SERVER_INFO = {"name": "fraud-investigator", "version": "2.0.0"}
-CAPABILITIES = {
-    "tools": {"listChanged": False},
-    "resources": {},
-}
+CAPABILITIES = {"tools": {"listChanged": False}, "resources": {}}
 
 
 def ok(req_id, result):
@@ -107,34 +125,35 @@ async def mcp(request: Request):
     params = body.get("params", {})
     req_id = body.get("id")
 
-    # Read new headers (for logging; nginx uses them for routing)
-    mcp_method = request.headers.get("Mcp-Method", "")
-    mcp_name   = request.headers.get("Mcp-Name", "")
-    proto_ver  = request.headers.get("MCP-Protocol-Version", "unknown")
-
-    # _meta carries client identity instead of a session id
-    meta   = params.get("_meta", {})
-    client = meta.get("io.modelcontextprotocol/clientInfo", {})
+    proto_ver = request.headers.get("MCP-Protocol-Version", "unknown")
+    meta      = params.get("_meta", {})
+    client    = meta.get("io.modelcontextprotocol/clientInfo", {})
 
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
-    print(f"\n[{ts}] ← {method}  proto={proto_ver}  client={client.get('name','?')}")
-    if mcp_name:
-        print(f"        Mcp-Method={mcp_method}  Mcp-Name={mcp_name}")
+    instance = os.environ.get("INSTANCE", "standalone")
+    print(f"[{ts}] [{instance}] ← {method}  proto={proto_ver}  client={client.get('name', '?')}")
 
-    # ── server/discover ────────────────────────────────────────────────────
+    # ── Strict session enforcement (old-protocol simulation) ────────────────
+    if STRICT_SESSIONS and method in ("tools/list", "tools/call"):
+        sid = request.headers.get("Mcp-Session-Id") or request.headers.get("mcp-session-id")
+        if not sid or sid not in LOCAL_SESSIONS:
+            print(f"  ✗ [{instance}] Session {sid!r} not found — returning error")
+            return JSONResponse(content=rpc_err(req_id, -32600, f"Invalid session on {instance} — re-initialize"))
+
+    # ── server/discover ──────────────────────────────────────────────────────
     if method == "server/discover":
-        print("  → responding with serverInfo + capabilities")
         return JSONResponse(content=ok(req_id, {
             "protocolVersion": "2026-07-28",
             "serverInfo": SERVER_INFO,
             "capabilities": CAPABILITIES,
         }))
 
-    # ── initialize (old client compatibility — respond with deprecation notice) ──
+    # ── initialize (old-client compat + strict-session mint) ────────────────
     if method == "initialize":
-        print("  ⚠  Old initialize received — returning 2025-11-25 response for compat")
-        import uuid
         sid = str(uuid.uuid4())
+        if STRICT_SESSIONS:
+            LOCAL_SESSIONS[sid] = datetime.now(timezone.utc).isoformat()
+            print(f"  ⚑ [{instance}] Session minted: {sid[:8]}…")
         return JSONResponse(
             content=ok(req_id, {
                 "protocolVersion": "2025-11-25",
@@ -149,26 +168,42 @@ async def mcp(request: Request):
         from fastapi.responses import Response
         return Response(status_code=204)
 
-    # ── tools/list ─────────────────────────────────────────────────────────
+    # ── tools/list ───────────────────────────────────────────────────────────
     if method == "tools/list":
         return JSONResponse(content=ok(req_id, {
             "tools": TOOLS,
-            "ttlMs": 300_000,       # new in 2026-07-28: client may cache for 5 min
+            "ttlMs": 300_000,
             "cacheScope": "session",
         }))
 
-    # ── tasks/get (io.modelcontextprotocol/tasks extension) ───────────────
+    # ── tasks/get ────────────────────────────────────────────────────────────
     if method == "tasks/get":
         task_id = params.get("taskId", "")
-        task    = TASKS.get(task_id)
+        task = await task_get(task_id)
         if not task:
             return JSONResponse(content=rpc_err(req_id, -32602, f"Task not found: {task_id}"))
         return JSONResponse(content=ok(req_id, task))
 
-    # ── tools/call ─────────────────────────────────────────────────────────
+    # ── tasks/cancel ─────────────────────────────────────────────────────────
+    if method == "tasks/cancel":
+        task_id = params.get("taskId", "")
+        task = await task_get(task_id)
+        if not task:
+            return JSONResponse(content=rpc_err(req_id, -32602, f"Task not found: {task_id}"))
+        if task.get("status") != "running":
+            return JSONResponse(content=rpc_err(
+                req_id, -32602,
+                f"Cannot cancel task with status={task['status']!r}"
+            ))
+        task["status"] = "cancelled"
+        await task_set(task_id, task)
+        print(f"  ✗ Task {task_id} cancelled")
+        return JSONResponse(content=ok(req_id, {"cancelled": True, "taskId": task_id}))
+
+    # ── tools/call ───────────────────────────────────────────────────────────
     if method == "tools/call":
-        name = params.get("name")
-        args = params.get("arguments", {})
+        name   = params.get("name")
+        args   = params.get("arguments", {})
         result = await dispatch_tool(req_id, name, args, params)
         return JSONResponse(content=result)
 
@@ -179,7 +214,6 @@ async def mcp(request: Request):
 
 
 async def dispatch_tool(req_id, name: str, args: dict, params: dict = {}):
-    import asyncio
 
     if name == "lookup_transaction":
         tid = args.get("transaction_id", "")
@@ -207,14 +241,12 @@ async def dispatch_tool(req_id, name: str, args: dict, params: dict = {}):
         return ok(req_id, text_result("Flagged accounts:\n" + "\n".join(lines)))
 
     if name == "flag_account":
-        aid           = args.get("account_id", "")
-        reason        = args.get("reason", "")
-        input_responses = params.get("inputResponses")   # present on second call
+        aid    = args.get("account_id", "")
+        reason = args.get("reason", "")
+        input_responses = params.get("inputResponses")
         request_state   = params.get("requestState")
 
         if input_responses is None:
-            # ── First call: return InputRequiredResult ─────────────────────
-            # Encode all context into requestState so no server-side storage needed
             state_payload = base64.urlsafe_b64encode(
                 json.dumps({"account_id": aid, "reason": reason}).encode()
             ).decode()
@@ -222,22 +254,18 @@ async def dispatch_tool(req_id, name: str, args: dict, params: dict = {}):
             print(f"  ↩  MRTR: requesting operator approval (requestId={request_id})")
             return ok(req_id, {
                 "resultType": "input_required",
-                "inputRequests": [
-                    {
-                        "id": request_id,
-                        "prompt": (
-                            f"Flag account {aid}?\n"
-                            f"Reason: {reason}\n"
-                            f"This action is irreversible. Approve? [y/N]"
-                        ),
-                    }
-                ],
+                "inputRequests": [{
+                    "id": request_id,
+                    "prompt": (
+                        f"Flag account {aid}?\n"
+                        f"Reason: {reason}\n"
+                        f"This action is irreversible. Approve? [y/N]"
+                    ),
+                }],
                 "requestState": state_payload,
                 "content": [{"type": "text", "text": "Awaiting operator approval before flagging account."}],
             })
 
-        # ── Second call: client echoed requestState + inputResponses ───────
-        # Recover original args from requestState (no session lookup needed)
         try:
             recovered = json.loads(base64.urlsafe_b64decode(request_state).decode())
             aid    = recovered["account_id"]
@@ -249,7 +277,6 @@ async def dispatch_tool(req_id, name: str, args: dict, params: dict = {}):
         approved = str(approval_response.get("approved", "")).lower() in ("true", "yes", "y", "1")
 
         if not approved:
-            print(f"  ✗ Operator declined to flag {aid}")
             return ok(req_id, text_result(f"Flag operation declined by operator. Account {aid} unchanged."))
 
         FLAGGED_ACCOUNTS[aid] = {
@@ -258,19 +285,16 @@ async def dispatch_tool(req_id, name: str, args: dict, params: dict = {}):
             "flagged_at": datetime.now(timezone.utc).isoformat(),
         }
         print(f"  ⚑ Flagged {aid} after MRTR approval: {reason}")
-        return ok(req_id, text_result(
-            f"Account {aid} flagged after operator approval.\nReason: {reason}"
-        ))
+        return ok(req_id, text_result(f"Account {aid} flagged after operator approval.\nReason: {reason}"))
 
     if name == "deep_scan_account_history":
         aid     = args.get("account_id", "")
         task_id = f"task_{uuid.uuid4().hex[:12]}"
 
-        # Register task as pending and kick off background work
-        TASKS[task_id] = {"status": "running", "output": None}
-        asyncio.get_event_loop().create_task(_run_deep_scan(task_id, aid))
+        await task_set(task_id, {"status": "running", "output": None})
+        asyncio.create_task(_run_deep_scan(task_id, aid))
 
-        print(f"  ✓ Task started: {task_id}  (client can poll tasks/get)")
+        print(f"  ✓ Task {task_id} started (Redis-backed)")
         return ok(req_id, {
             "resultType": "task",
             "taskId": task_id,
@@ -281,8 +305,15 @@ async def dispatch_tool(req_id, name: str, args: dict, params: dict = {}):
 
 
 async def _run_deep_scan(task_id: str, account_id: str):
-    """Background coroutine — simulates expensive scan work."""
-    await asyncio.sleep(4)   # visible pause for the demo
+    """Background coroutine — writes result to Redis so any instance can serve it."""
+    await asyncio.sleep(4)
+
+    # Respect cancellation — check Redis before writing result
+    task = await task_get(task_id)
+    if task and task.get("status") == "cancelled":
+        print(f"  ✗ Task {task_id} was cancelled — discarding result")
+        return
+
     history = ACCOUNT_HISTORY.get(account_id, [])
     total   = sum(t["amount"] for t in history)
     text = (
@@ -291,17 +322,17 @@ async def _run_deep_scan(task_id: str, account_id: str):
         f"  Total volume: ${total:,.2f}\n"
         f"  Verdict: {'HIGH RISK — escalate immediately' if total > 10_000 else 'Low risk'}"
     )
-    TASKS[task_id] = {
+    await task_set(task_id, {
         "status": "completed",
         "output": text_result(text),
-    }
-    print(f"\n  ✓ Task {task_id} completed")
+    })
+    print(f"  ✓ Task {task_id} completed — result written to Redis")
 
 
 if __name__ == "__main__":
-    import os
     port     = int(os.getenv("PORT", 8000))
     instance = os.getenv("INSTANCE", "standalone")
-    print(f"Fraud Alert Investigator (05-stateless-scale) [{instance}] — port {port}")
-    print("No session store. Any instance handles any request.")
+    mode     = "STRICT-SESSIONS" if STRICT_SESSIONS else "stateless"
+    print(f"Fraud Alert Investigator (11-redis-tasks) [{instance}] — port {port}  [{mode}]")
+    print(f"Redis: {REDIS_URL}")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")

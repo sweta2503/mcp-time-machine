@@ -1,8 +1,5 @@
-# Branch 03-new-sdk-old-behavior
-# SDK bumped to 2026-07-28-capable version.
-# Server code is UNCHANGED — old client still works unmodified.
-# This demonstrates the deprecation window: new SDK, old wire protocol.
+# Branch 11-redis-tasks
 fastapi==0.115.6
 uvicorn[standard]==0.32.0
 httpx==0.28.0
-# mcp>=1.10.0  # uncomment when you want to use the official SDK wrapper
+redis>=5.0.0
