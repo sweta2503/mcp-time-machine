@@ -164,7 +164,7 @@ async def dispatch_tool(req_id, name: str, args: dict):
         if not FLAGGED_ACCOUNTS:
             return ok(req_id, text_result("No accounts currently flagged."))
         lines = [
-            f"  • {aid}: {info['holder']} — {info['flag_reason']}"
+            f"  • {aid}: {info.get('holder', 'Unknown')} — {info['flag_reason']}"
             for aid, info in FLAGGED_ACCOUNTS.items()
         ]
         return ok(req_id, text_result("Flagged accounts:\n" + "\n".join(lines)))
@@ -175,6 +175,7 @@ async def dispatch_tool(req_id, name: str, args: dict):
         reason = args.get("reason", "")
         FLAGGED_ACCOUNTS[aid] = {
             "account_id": aid,
+            "holder": "Unknown",
             "flag_reason": reason,
             "flagged_at": datetime.now(timezone.utc).isoformat(),
         }
