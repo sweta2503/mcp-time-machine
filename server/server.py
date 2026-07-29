@@ -1,16 +1,18 @@
 """
 MCP Fraud Alert Investigator
-Branch: 07-tasks  —  deep_scan_account_history as a Task
+Branch: 08-mrtr  —  Multi Round-Trip Requests for flag_account
 
-Changes from 06-workflow-handle:
-  • deep_scan_account_history returns {resultType:"task", taskId:"…"} immediately
-  • Background work runs in a asyncio.Task stored in TASKS dict
-  • New endpoint: tasks/get polls status; returns completed output when done
-  • Client can disconnect after kicking off the scan, then poll from any instance
-    (task state lives in-process per instance in this demo; in production you'd
-     use a lightweight shared store like Redis — but even in-process shows the
-     protocol pattern correctly)
-  • Extension namespace: io.modelcontextprotocol/tasks
+Changes from 07-tasks:
+  • flag_account on first call (no inputResponses) returns:
+        {resultType: "input_required",
+         inputRequests: [{id, prompt}],
+         requestState: <opaque blob>}
+  • Client prompts the operator (you, on camera), then retries with:
+        {inputResponses: [{id, approved: true/false}],
+         requestState: <echoed blob>}
+  • requestState is a signed opaque token; no server-side session needed.
+    Server decodes it on the second call to recover the original arguments.
+  • Natural fit: no real bank auto-flags an account without human sign-off.
 """
 import asyncio
 import base64
@@ -27,7 +29,7 @@ from fastapi.responses import JSONResponse
 sys.path.insert(0, ".")
 from data import ACCOUNT_HISTORY, FLAGGED_ACCOUNTS, TRANSACTIONS
 
-app = FastAPI(title="Fraud Alert Investigator — 07-tasks (2026-07-28)")
+app = FastAPI(title="Fraud Alert Investigator — 08-mrtr (2026-07-28)")
 
 # ── Task store (per-instance; shows the protocol pattern) ──────────────────
 # In production: replace with Redis or a lightweight shared DB.
@@ -199,42 +201,60 @@ async def dispatch_tool(req_id, name: str, args: dict):
         return ok(req_id, text_result("Flagged accounts:\n" + "\n".join(lines)))
 
     if name == "flag_account":
-        aid    = args.get("account_id", "")
-        reason = args.get("reason", "")
-        handle = args.get("workflowHandle")   # present on the second call
+        aid           = args.get("account_id", "")
+        reason        = args.get("reason", "")
+        input_responses = params.get("inputResponses")   # present on second call
+        request_state   = params.get("requestState")
 
-        if handle is None:
-            # First call: mint a handle encoding the operation, return it
-            payload  = json.dumps({"account_id": aid, "reason": reason, "ts": datetime.now(timezone.utc).isoformat()})
-            handle   = base64.urlsafe_b64encode(payload.encode()).decode()
-            checksum = hashlib.sha256(handle.encode()).hexdigest()[:8]
-            opaque_handle = f"wf_{checksum}_{handle[:20]}"   # truncated for display
-            print(f"  ↩  Issued workflow handle: {opaque_handle[:30]}…")
+        if input_responses is None:
+            # ── First call: return InputRequiredResult ─────────────────────
+            # Encode all context into requestState so no server-side storage needed
+            state_payload = base64.urlsafe_b64encode(
+                json.dumps({"account_id": aid, "reason": reason}).encode()
+            ).decode()
+            request_id = uuid.uuid4().hex[:8]
+            print(f"  ↩  MRTR: requesting operator approval (requestId={request_id})")
             return ok(req_id, {
-                "content": [{
-                    "type": "text",
-                    "text": (
-                        f"Flagging {aid} requires confirmation.\n"
-                        f"workflowHandle: {opaque_handle}\n"
-                        f"Call flag_account again with this handle and approved=true to commit."
-                    ),
-                }],
-                "workflowHandle": opaque_handle,
+                "resultType": "input_required",
+                "inputRequests": [
+                    {
+                        "id": request_id,
+                        "prompt": (
+                            f"Flag account {aid}?\n"
+                            f"Reason: {reason}\n"
+                            f"This action is irreversible. Approve? [y/N]"
+                        ),
+                    }
+                ],
+                "requestState": state_payload,
+                "content": [{"type": "text", "text": "Awaiting operator approval before flagging account."}],
             })
 
-        # Second call: handle present — decode and commit
-        approved = args.get("approved", False)
+        # ── Second call: client echoed requestState + inputResponses ───────
+        # Recover original args from requestState (no session lookup needed)
+        try:
+            recovered = json.loads(base64.urlsafe_b64decode(request_state).decode())
+            aid    = recovered["account_id"]
+            reason = recovered["reason"]
+        except Exception:
+            return rpc_err(req_id, -32602, "Invalid requestState")
+
+        approval_response = input_responses[0] if input_responses else {}
+        approved = str(approval_response.get("approved", "")).lower() in ("true", "yes", "y", "1")
+
         if not approved:
-            return ok(req_id, text_result(f"Flag operation cancelled by operator. Account {aid} unchanged."))
+            print(f"  ✗ Operator declined to flag {aid}")
+            return ok(req_id, text_result(f"Flag operation declined by operator. Account {aid} unchanged."))
 
         FLAGGED_ACCOUNTS[aid] = {
             "account_id": aid,
             "flag_reason": reason,
             "flagged_at": datetime.now(timezone.utc).isoformat(),
-            "via_handle": handle[:16] + "…",
         }
-        print(f"  ⚑ Flagged {aid} via handle: {reason}")
-        return ok(req_id, text_result(f"Account {aid} flagged. Reason: {reason}\nHandle confirmed: {handle[:16]}…"))
+        print(f"  ⚑ Flagged {aid} after MRTR approval: {reason}")
+        return ok(req_id, text_result(
+            f"Account {aid} flagged after operator approval.\nReason: {reason}"
+        ))
 
     if name == "deep_scan_account_history":
         aid     = args.get("account_id", "")
