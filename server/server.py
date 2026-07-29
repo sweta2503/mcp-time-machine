@@ -1,18 +1,18 @@
 """
 MCP Fraud Alert Investigator
-Branch: 04-discover  —  2026-07-28 stateless protocol, phase 1
+Branch: 06-workflow-handle  —  explicit handle pattern
 
-Changes from 01-legacy:
-  • initialize/initialized REMOVED
-  • server/discover ADDED — returns serverInfo + capabilities
-  • _meta in every request params (carries clientInfo instead of session)
-  • MCP-Protocol-Version header accepted and echoed
-  • Mcp-Method / Mcp-Name headers accepted (routing support)
-  • Session store DELETED — no per-instance state
-
-Old client still works: it will hit 'method not found' for initialize,
-but that's shown in README as expected during the transition window.
+Changes from 05-stateless-scale:
+  • flag_account now returns an opaque workflow handle on first call
+  • Client echoes the handle back as workflowHandle in the follow-up call
+  • Server uses the handle to correlate the two-step operation —
+    NO session state required, handle carries all needed context
+  • Demonstrates spec guidance: "mint an explicit handle from a tool
+    and have the model pass it back as an argument"
 """
+import base64
+import hashlib
+import json
 import sys
 from datetime import datetime, timezone
 
@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 sys.path.insert(0, ".")
 from data import ACCOUNT_HISTORY, FLAGGED_ACCOUNTS, TRANSACTIONS
 
-app = FastAPI(title="Fraud Alert Investigator — 05-stateless-scale (2026-07-28)")
+app = FastAPI(title="Fraud Alert Investigator — 06-workflow-handle (2026-07-28)")
 
 TOOLS = [
     {
@@ -185,14 +185,40 @@ async def dispatch_tool(req_id, name: str, args: dict):
     if name == "flag_account":
         aid    = args.get("account_id", "")
         reason = args.get("reason", "")
-        # Stateless: flag immediately (MRTR added in branch 08)
+        handle = args.get("workflowHandle")   # present on the second call
+
+        if handle is None:
+            # First call: mint a handle encoding the operation, return it
+            payload  = json.dumps({"account_id": aid, "reason": reason, "ts": datetime.now(timezone.utc).isoformat()})
+            handle   = base64.urlsafe_b64encode(payload.encode()).decode()
+            checksum = hashlib.sha256(handle.encode()).hexdigest()[:8]
+            opaque_handle = f"wf_{checksum}_{handle[:20]}"   # truncated for display
+            print(f"  ↩  Issued workflow handle: {opaque_handle[:30]}…")
+            return ok(req_id, {
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        f"Flagging {aid} requires confirmation.\n"
+                        f"workflowHandle: {opaque_handle}\n"
+                        f"Call flag_account again with this handle and approved=true to commit."
+                    ),
+                }],
+                "workflowHandle": opaque_handle,
+            })
+
+        # Second call: handle present — decode and commit
+        approved = args.get("approved", False)
+        if not approved:
+            return ok(req_id, text_result(f"Flag operation cancelled by operator. Account {aid} unchanged."))
+
         FLAGGED_ACCOUNTS[aid] = {
             "account_id": aid,
             "flag_reason": reason,
             "flagged_at": datetime.now(timezone.utc).isoformat(),
+            "via_handle": handle[:16] + "…",
         }
-        print(f"  ⚑ Flagged {aid}: {reason}")
-        return ok(req_id, text_result(f"Account {aid} flagged. Reason: {reason}"))
+        print(f"  ⚑ Flagged {aid} via handle: {reason}")
+        return ok(req_id, text_result(f"Account {aid} flagged. Reason: {reason}\nHandle confirmed: {handle[:16]}…"))
 
     if name == "deep_scan_account_history":
         aid = args.get("account_id", "")
