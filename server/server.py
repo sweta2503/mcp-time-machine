@@ -143,9 +143,10 @@ async def mcp(request: Request):
     # ── server/discover ──────────────────────────────────────────────────────
     if method == "server/discover":
         return JSONResponse(content=ok(req_id, {
-            "protocolVersion": "2026-07-28",
-            "serverInfo": SERVER_INFO,
+            "resultType": "complete",
+            "supportedVersions": ["2026-07-28", "2025-11-25"],
             "capabilities": CAPABILITIES,
+            "_meta": {"serverInfo": SERVER_INFO},
         }))
 
     # ── initialize (old-client compat + strict-session mint) ────────────────
@@ -173,7 +174,7 @@ async def mcp(request: Request):
         return JSONResponse(content=ok(req_id, {
             "tools": TOOLS,
             "ttlMs": 300_000,
-            "cacheScope": "session",
+            "cacheScope": "private",
         }))
 
     # ── tasks/get ────────────────────────────────────────────────────────────
@@ -204,6 +205,12 @@ async def mcp(request: Request):
     if method == "tools/call":
         name   = params.get("name")
         args   = params.get("arguments", {})
+        mcp_name_hdr = request.headers.get("Mcp-Name", "")
+        if mcp_name_hdr and name and mcp_name_hdr != name:
+            return JSONResponse(
+                content=rpc_err(req_id, -32600, f"Mcp-Name header {mcp_name_hdr!r} doesn't match body name={name!r}"),
+                status_code=400,
+            )
         result = await dispatch_tool(req_id, name, args, params)
         return JSONResponse(content=result)
 
@@ -235,7 +242,7 @@ async def dispatch_tool(req_id, name: str, args: dict, params: dict = {}):
         if not FLAGGED_ACCOUNTS:
             return ok(req_id, text_result("No accounts currently flagged."))
         lines = [
-            f"  • {aid}: {info['holder']} — {info['flag_reason']}"
+            f"  • {aid}: {info.get('holder', 'Unknown')} — {info['flag_reason']}"
             for aid, info in FLAGGED_ACCOUNTS.items()
         ]
         return ok(req_id, text_result("Flagged accounts:\n" + "\n".join(lines)))
@@ -247,6 +254,8 @@ async def dispatch_tool(req_id, name: str, args: dict, params: dict = {}):
         request_state   = params.get("requestState")
 
         if input_responses is None:
+            # WARNING: requestState is not signed. In production, bind it to
+            # the authenticated user with HMAC to prevent client tampering.
             state_payload = base64.urlsafe_b64encode(
                 json.dumps({"account_id": aid, "reason": reason}).encode()
             ).decode()
@@ -281,6 +290,7 @@ async def dispatch_tool(req_id, name: str, args: dict, params: dict = {}):
 
         FLAGGED_ACCOUNTS[aid] = {
             "account_id": aid,
+            "holder": "Unknown",
             "flag_reason": reason,
             "flagged_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -288,10 +298,18 @@ async def dispatch_tool(req_id, name: str, args: dict, params: dict = {}):
         return ok(req_id, text_result(f"Account {aid} flagged after operator approval.\nReason: {reason}"))
 
     if name == "deep_scan_account_history":
+        client_caps = params.get("_meta", {}).get("io.modelcontextprotocol/capabilities", {})
+        supports_tasks = "io.modelcontextprotocol/tasks" in client_caps
         aid     = args.get("account_id", "")
         task_id = f"task_{uuid.uuid4().hex[:12]}"
 
-        await task_set(task_id, {"status": "running", "output": None})
+        now = datetime.now(timezone.utc).isoformat()
+        await task_set(task_id, {
+            "status": "working",
+            "startedAt": now,
+            "ttlMs": 300_000,
+            "pollIntervalMs": 1_000,
+        })
         asyncio.create_task(_run_deep_scan(task_id, aid))
 
         print(f"  ✓ Task {task_id} started (Redis-backed)")
@@ -324,7 +342,8 @@ async def _run_deep_scan(task_id: str, account_id: str):
     )
     await task_set(task_id, {
         "status": "completed",
-        "output": text_result(text),
+        "completedAt": datetime.now(timezone.utc).isoformat(),
+        "result": text_result(text),
     })
     print(f"  ✓ Task {task_id} completed — result written to Redis")
 
