@@ -1,7 +1,7 @@
 # MCP Time Machine — Fraud Alert Investigator
 
 Live migration demo from MCP **2025-11-25** (stateful) → **2026-07-28** (stateless).  
-Each git branch = one YouTube segment. Same server, same app — one protocol change at a time.
+Each git branch = one important segment. Same server, same app — one protocol change at a time.
 
 ## What this repo covers
 
